@@ -1,0 +1,13 @@
+pyyaml
+websockets
+python-dotenv
+numpy
+pandas
+requests
+plotly
+pydantic
+aiohttp
+websocket-client
+python-binance
+psutil
+

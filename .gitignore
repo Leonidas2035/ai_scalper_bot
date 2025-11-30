@@ -1,0 +1,19 @@
+# venv
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+__pycache__/
+
+# дані / логи
+data/
+storage/db/
+storage/cache/
+*.log
+
+# секрети
+config/secrets.env
+*.key
+*.pem

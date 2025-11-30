@@ -1,0 +1,36 @@
+app:
+  mode: "paper"      # paper / live
+  log_level: "INFO"
+  use_llm: false     # поки вимкнено
+  use_futures: false # включимо пізніше
+  use_redis: false   # включимо на етапі 5
+  data_save: true
+  data_path: "./data"
+
+binance:
+  base_url: "https://api.binance.com"
+  ws_spot_base: "wss://stream.binance.com:9443"
+  recv_window: 5000
+  symbols: ["BTCUSDT", "ETHUSDT"]
+
+ai:
+  llm_model: "gpt-4.1-mini"
+  temperature: 0.2
+  max_tokens: 300
+  api_url: "https://api.openai.com/v1/chat/completions"
+
+risk:
+  max_daily_loss: 30        # $
+  max_position_risk: 0.5    # %
+  limit_slippage: 0.08      # 0.08% max
+  disable_on_error: true
+
+storage:
+  save_orderbook: true
+  save_trades: true
+  save_oi: false
+  save_funding: false
+
+backtester:
+  use: false
+  replay_speed: "realtime"   # or fast
