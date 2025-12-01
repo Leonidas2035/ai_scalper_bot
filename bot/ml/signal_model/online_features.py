@@ -1,67 +1,52 @@
-import pandas as pd
-import numpy as np
+from collections import deque
 from typing import Optional
 
-FEATURE_COLS = [
-    "ret_1",
-    "ret_log_1",
-    "ret_mean_3",
-    "ret_std_3",
-    "ret_mean_5",
-    "ret_std_5",
-    "ret_mean_10",
-    "ret_std_10",
-    "vol_sum_3",
-    "vol_sum_5",
-    "vol_sum_10",
-]
+import numpy as np
+
+from bot.ml.signal_model.dataset_builder import FEATURE_COLS
 
 
 class OnlineFeatureBuilder:
     """
-    Онлайн-обчислювач фіч, які відповідають тренувальному датасету:
-    ret_1, ret_log_1, ret_mean/std_{3,5,10}, vol_sum_{3,5,10}
+    Incrementally builds the same feature vector as DatasetBuilder for live/offline streaming ticks.
     """
 
-    def __init__(self, window: int = 100):
-        self.window = window
-        self.df = pd.DataFrame(columns=["timestamp", "price", "qty"])
+    def __init__(self, max_window: int = 10):
+        self.max_window = max_window
+        self.prices = deque(maxlen=max_window + 1)
+        self.qty = deque(maxlen=max_window)
 
-    def update(self, ts: int, price: float, qty: float) -> Optional[np.ndarray]:
-        row = {"timestamp": ts, "price": float(price), "qty": float(qty)}
-        self.df = pd.concat([self.df, pd.DataFrame([row])], ignore_index=True)
+    def add_tick(self, timestamp: int, price: float, qty: float) -> Optional[np.ndarray]:
+        self.prices.append(float(price))
+        self.qty.append(float(qty))
 
-        # тримаємо тільки останні N тиков
-        if len(self.df) > self.window:
-            self.df = self.df.iloc[-self.window :].reset_index(drop=True)
-
-        # замало даних для rolling — ще нічого не рахуємо
-        if len(self.df) < 20:
+        if len(self.prices) < self.max_window + 1:
             return None
 
-        df = self.df.copy()
-        df["mid"] = df["price"].astype(float)
+        price_arr = np.array(self.prices, dtype=float)
+        qty_arr = np.array(self.qty, dtype=float)
 
-        df["ret_1"] = df["mid"].pct_change()
-        df["ret_log_1"] = np.log(df["mid"] / df["mid"].shift(1))
+        ret_1 = price_arr[1:] / price_arr[:-1] - 1.0
+        ret_log_1 = np.diff(np.log(price_arr))
 
-        for w in (3, 5, 10):
-            r = df["ret_1"].rolling(w)
-            df[f"ret_mean_{w}"] = r.mean()
-            df[f"ret_std_{w}"] = r.std()
-            df[f"vol_sum_{w}"] = df["qty"].rolling(w).sum()
+        def _mean(arr, window):
+            return float(np.mean(arr[-window:]))
 
-        last = df.iloc[-1]
+        def _std(arr, window):
+            return float(np.std(arr[-window:]))
 
-        # якщо базові фічі ще NaN — чекаємо далі
-        if last[["ret_1", "ret_log_1"]].isna().any():
-            return None
+        features = [
+            float(ret_1[-1]),
+            float(ret_log_1[-1]),
+            _mean(ret_1, 3),
+            _std(ret_1, 3),
+            _mean(ret_1, 5),
+            _std(ret_1, 5),
+            _mean(ret_1, 10),
+            _std(ret_1, 10),
+            float(np.sum(qty_arr[-3:])),
+            float(np.sum(qty_arr[-5:])),
+            float(np.sum(qty_arr[-10:])),
+        ]
 
-        feats = []
-        for col in FEATURE_COLS:
-            val = last.get(col)
-            if pd.isna(val):
-                return None
-            feats.append(float(val))
-
-        return np.asarray(feats, dtype=float)
+        return np.array(features, dtype=float)

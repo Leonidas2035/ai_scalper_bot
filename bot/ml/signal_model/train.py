@@ -1,57 +1,72 @@
-import os
+import argparse
 from pathlib import Path
 
 import xgboost as xgb
 
-from .dataset_builder import DatasetBuilder, FEATURE_COLS, TARGET_COL
+from bot.ml.signal_model.dataset_builder import DatasetBuilder
 
 
-def train_model(symbol: str = "BTCUSDT", horizon: int = 1):
-    print("[INFO] Building dataset...")
+def train_model(symbol: str = "BTCUSDT", horizon: int = 1, min_rows: int = 1000):
+    root = Path(__file__).resolve().parents[3]
+    model_dir = root / "storage" / "models"
+    dataset_dir = root / "storage" / "datasets"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    dataset_dir.mkdir(parents=True, exist_ok=True)
 
+    print(f"[INFO] Building dataset for {symbol}, horizon={horizon} ...")
     builder = DatasetBuilder(symbol=symbol, horizon=horizon)
-    X, y, df = builder.build_dataset()
+    X, y, df = builder.build()
 
-    n = len(X)
-    print(f"[INFO] Dataset size: {n} rows")
-
-    if n < 500:
-        print("[ERROR] Not enough data to train (need >= 500 rows).")
+    if X.empty or len(X) < min_rows:
+        print(f"[ERROR] Not enough training data ({len(X)} rows). Need at least {min_rows}.")
         return
 
-    dtrain = xgb.DMatrix(X, label=y)
+    if y.nunique() < 2:
+        print("[ERROR] Target contains a single class. Need both up/down examples to train.")
+        return
 
     params = {
+        "n_estimators": 300,
+        "max_depth": 5,
+        "learning_rate": 0.05,
+        "subsample": 0.85,
+        "colsample_bytree": 0.85,
         "objective": "binary:logistic",
         "eval_metric": "logloss",
-        "eta": 0.05,
-        "max_depth": 6,
-        "subsample": 0.8,
-        "colsample_bytree": 0.8,
+        "tree_method": "hist",
     }
 
-    print("[INFO] Training model...")
-    model = xgb.train(
-        params=params,
-        dtrain=dtrain,
-        num_boost_round=150,
-    )
+    model = xgb.XGBClassifier(**params)
+    print("[INFO] Training XGBoost model ...")
+    model.fit(X, y)
 
-    models_dir = Path("storage") / "models"
-    models_dir.mkdir(parents=True, exist_ok=True)
-
-    model_path = models_dir / f"signal_xgb_{symbol}_h{horizon}.json"
+    model_path = model_dir / f"signal_xgb_{symbol}_h{horizon}.json"
     model.save_model(model_path)
+    print(f"[OK] Model saved to {model_path}")
 
-    print(f"[OK] Saved model: {model_path}")
-
-    # Save full dataset for debug
-    out_ds = Path("storage") / "datasets"
-    out_ds.mkdir(parents=True, exist_ok=True)
-    builder.save_parquet(df, out_ds / f"{symbol}_h{horizon}.parquet")
-
+    dataset_path = dataset_dir / f"{symbol}_h{horizon}.parquet"
+    try:
+        df.to_parquet(dataset_path, index=False)
+        print(f"[OK] Dataset saved to {dataset_path}")
+    except Exception as exc:
+        fallback_path = dataset_dir / f"{symbol}_h{horizon}.csv"
+        df.to_csv(fallback_path, index=False)
+        print(f"[WARN] Could not save parquet ({exc}). Saved CSV instead: {fallback_path}")
     print("[DONE] Training complete.")
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train signal model offline.")
+    parser.add_argument("--symbol", type=str, default="BTCUSDT", help="Symbol to train on (e.g., BTCUSDT)")
+    parser.add_argument("--horizon", type=int, default=1, help="Prediction horizon in ticks")
+    parser.add_argument("--min-rows", type=int, default=1000, help="Minimum rows required to train")
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    train_model(symbol=args.symbol, horizon=args.horizon, min_rows=args.min_rows)
+
+
 if __name__ == "__main__":
-    train_model(symbol="BTCUSDT", horizon=1)
+    main()

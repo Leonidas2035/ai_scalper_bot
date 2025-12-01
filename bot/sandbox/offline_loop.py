@@ -1,113 +1,96 @@
-import csv
-import os
-import numpy as np
+import argparse
+from pathlib import Path
 
-from bot.ml.signal_model.online_features import OnlineFeatureBuilder
-from bot.ml.signal_model.model import SignalModel
+import pandas as pd
+
 from bot.engine.decision_engine import DecisionEngine
+from bot.ml.ensemble import EnsembleSignalModel
+from bot.ml.signal_model.model import SignalOutput
+from bot.ml.signal_model.online_features import OnlineFeatureBuilder
+from bot.trading.paper_trader import PaperTrader
+
+DEFAULT_TICKS = Path("data") / "ticks" / "BTCUSDT_synthetic.csv"
 
 
-OFFLINE_TICKS_PATH = os.path.join("data", "ticks", "BTCUSDT_synthetic.csv")
-
-
-def load_ticks(filepath: str):
-    if not os.path.exists(filepath):
-        print(f"[ERROR] Ticks file not found: {filepath}")
-        return []
-
-    ticks = []
-    with open(filepath, "r", newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            try:
-                ts = int(row["timestamp"])
-                price = float(row["price"])
-                qty = float(row.get("qty") or 0.0)
-                ticks.append({"timestamp": ts, "price": price, "qty": qty})
-            except Exception:
-                continue
-    return ticks
-
-
-def offline_backtest(
-    symbol: str = "BTCUSDT",
-    file_path: str = OFFLINE_TICKS_PATH,
-    horizon: int = 1,
-):
-    print(f"[INFO] Loading ticks from {file_path} ...")
-    ticks = load_ticks(file_path)
-    print(f"[INFO] Loaded {len(ticks)} ticks")
-
-    if not ticks:
-        print("[ERROR] No ticks loaded. Check file path or generate data.")
-        return
-
+def load_ticks(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        print(f"[ERROR] Tick file not found: {path}")
+        return pd.DataFrame()
     try:
-        model = SignalModel(symbol=symbol, horizon=horizon)
-    except FileNotFoundError as e:
-        print(f"[ERROR] {e}")
-        print("[HINT] Run training first: python -m bot.ml.signal_model.train")
+        df = pd.read_csv(path)
+        required = {"timestamp", "price", "qty", "side"}
+        missing = required - set(df.columns)
+        if missing:
+            print(f"[ERROR] Tick file missing columns: {missing}")
+            return pd.DataFrame()
+        return df
+    except Exception as exc:
+        print(f"[ERROR] Failed to load ticks: {exc}")
+        return pd.DataFrame()
+
+
+def run_backtest(ticks_path: Path, symbol: str = "BTCUSDT"):
+    df = load_ticks(ticks_path)
+    if df.empty:
+        print("[ERROR] No ticks to run offline loop.")
         return
 
-    fb = OnlineFeatureBuilder(window=200)
-    risk = DecisionEngine(balance_usdt=1000, max_risk_per_trade=0.005)
+    print(f"[INFO] Loaded {len(df)} ticks from {ticks_path}")
 
-    position = 0.0
-    entry_price = 0.0
-    pnl = 0.0
-    trades = 0
-    last_price = None
+    ensemble = EnsembleSignalModel(symbol=symbol, horizons=[1, 3, 10])
+    if not ensemble.models:
+        print("[ERROR] No models available for ensemble. Train models first.")
+        return
 
-    for t in ticks:
-        ts = t["timestamp"]
-        price = t["price"]
-        qty = t["qty"]
-        last_price = price
+    feature_builder = OnlineFeatureBuilder()
+    engine = DecisionEngine(min_confidence=0.55, min_edge=0.0)
+    trader = PaperTrader()
 
-        feat = fb.update(ts, price, qty)
-        if feat is None:
+    ticks_used = 0
+
+    for _, row in df.iterrows():
+        ts = int(row["timestamp"])
+        price = float(row["price"])
+        qty = float(row["qty"])
+
+        features = feature_builder.add_tick(ts, price, qty)
+        if features is None:
             continue
 
-        signal = model.predict_proba(feat)
-        decision = risk.decide(signal, price, position)
+        block, reason = EnsembleSignalModel.filter_blocks(features)
+        if block:
+            continue
 
-        if decision.action == "open_long":
-            position = decision.size
-            entry_price = price
-            trades += 1
-            print(f"[OPEN LONG] size={position} entry={price}")
+        ticks_used += 1
+        ens_out = ensemble.predict(features)
+        if not ens_out.components:
+            continue
 
-        elif decision.action == "open_short":
-            position = -decision.size
-            entry_price = price
-            trades += 1
-            print(f"[OPEN SHORT] size={position} entry={price}")
+        p_up = 0.5 + ens_out.meta_edge
+        p_down = 0.5 - ens_out.meta_edge
+        pseudo_signal = SignalOutput(p_up=p_up, p_down=p_down, edge=ens_out.meta_edge, direction=ens_out.direction)
 
-        elif decision.action == "close" and position != 0:
-            if position > 0:
-                trade_pnl = (price - entry_price) * abs(position)
-            else:
-                trade_pnl = (entry_price - price) * abs(position)
+        decision = engine.decide(pseudo_signal, price, position=int(trader.position))
+        trader.process_sync(decision, price, ts)
 
-            pnl += trade_pnl
-            print(f"[CLOSE] trade_pnl={trade_pnl:.3f} total={pnl:.3f} exit={price}")
-            position = 0.0
+    summary = trader.summary()
+    print("----- Offline Backtest Summary -----")
+    print(f"Ticks processed: {ticks_used}")
+    print(f"Trades: {summary['trades']}")
+    print(f"Final PnL: {summary['realized_pnl'] + summary['open_pnl']:.4f}")
 
-    if position != 0 and last_price is not None:
-        if position > 0:
-            trade_pnl = (last_price - entry_price) * abs(position)
-        else:
-            trade_pnl = (entry_price - last_price) * abs(position)
-        pnl += trade_pnl
-        print(f"[FORCE CLOSE] trade_pnl={trade_pnl:.3f} total={pnl:.3f} exit={last_price}")
 
-    print("\n========= RESULT =========")
-    print(f"Symbol: {symbol}  Horizon: {horizon}")
-    print(f"Ticks: {len(ticks)}")
-    print(f"Trades: {trades}")
-    print(f"Final PnL: {pnl:.3f} USDT")
-    print("==========================")
+def parse_args():
+    parser = argparse.ArgumentParser(description="Offline backtest loop.")
+    parser.add_argument("--ticks-path", type=Path, default=DEFAULT_TICKS, help="Path to tick CSV file")
+    parser.add_argument("--symbol", type=str, default="BTCUSDT", help="Trading symbol")
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    run_backtest(ticks_path=args.ticks_path, symbol=args.symbol)
 
 
 if __name__ == "__main__":
-    offline_backtest()
+    main()

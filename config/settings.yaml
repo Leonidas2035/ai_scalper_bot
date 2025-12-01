@@ -1,11 +1,18 @@
 app:
-  mode: "offline"      # offline / online
+  mode: "paper"    # offline / paper / live
+  websocket: "mock"  # mock / binance
   log_level: "INFO"
-  use_llm: false     # поки вимкнено
-  use_futures: false # включимо пізніше
-  use_redis: false   # включимо на етапі 5
+  llm_enabled: false
+  llm_model: "gpt-5.1"
+  use_llm: false
+  use_futures: false
+  use_redis: false
   data_save: true
   data_path: "./data"
+  risk:
+    max_daily_dd: 0.03
+    max_exposure: 2.0
+    llm_require_edge: 0.015
 
 binance:
   base_url: "https://api.binance.com"

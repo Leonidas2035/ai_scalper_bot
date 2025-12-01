@@ -11,5 +11,5 @@ websocket-client
 python-binance
 psutil
 xgboost
-scikit-learn
 pyarrow
+scikit-learn

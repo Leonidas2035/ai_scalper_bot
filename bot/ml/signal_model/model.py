@@ -1,11 +1,11 @@
-import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import xgboost as xgb
 
-MODELS_DIR = os.path.join("storage", "models")
+from bot.ml.signal_model.dataset_builder import FEATURE_COLS
 
 
 @dataclass
@@ -13,45 +13,40 @@ class SignalOutput:
     p_up: float
     p_down: float
     edge: float
-    direction: int  # +1 long, -1 short, 0 flat
+    direction: int
 
 
 class SignalModel:
-    def __init__(self, symbol: str, horizon: int = 1):
-        self.symbol = symbol.upper()
-        self.horizon = horizon
+    """
+    Thin wrapper around an XGBoost binary classifier for signal generation.
+    """
 
-        model_path = os.path.join(
-            MODELS_DIR, f"signal_xgb_{self.symbol}_h{self.horizon}.json"
-        )
-        if not os.path.exists(model_path):
+    def __init__(self, symbol: str = "BTCUSDT", horizon: int = 1, model_dir: Optional[Path] = None):
+        root = Path(__file__).resolve().parents[3]
+        self.model_dir = model_dir or (root / "storage" / "models")
+        self.model_dir.mkdir(parents=True, exist_ok=True)
+        self.model_path = self.model_dir / f"signal_xgb_{symbol}_h{horizon}.json"
+        self.model = self._load_model()
+
+    def _load_model(self) -> xgb.XGBClassifier:
+        if not self.model_path.exists():
             raise FileNotFoundError(
-                f"Model not found: {model_path}. "
-                f"Train model first or put trained XGBoost model here."
+                f"Model not found: {self.model_path}. Train model first (python -m bot.ml.signal_model.train)."
             )
-
-        self.model = xgb.XGBClassifier()
-        self.model.load_model(model_path)
+        model = xgb.XGBClassifier()
+        model.load_model(str(self.model_path))
+        return model
 
     def predict_proba(self, features: np.ndarray) -> SignalOutput:
-        if features.ndim == 1:
-            features = features.reshape(1, -1)
+        arr = np.asarray(features, dtype=float).reshape(1, -1)
+        if arr.shape[1] != len(FEATURE_COLS):
+            raise ValueError(
+                f"Feature length mismatch. Expected {len(FEATURE_COLS)} features ({FEATURE_COLS}), got shape {arr.shape}."
+            )
 
-        proba = self.model.predict_proba(features)[0]  # [p_down, p_up]
-        p_down = float(proba[0])
-        p_up = float(proba[1])
+        probs = self.model.predict_proba(arr)[0]
+        p_down = float(probs[0])
+        p_up = float(probs[1])
         edge = p_up - 0.5
-
-        if p_up > 0.5:
-            direction = 1
-        elif p_up < 0.5:
-            direction = -1
-        else:
-            direction = 0
-
-        return SignalOutput(
-            p_up=p_up,
-            p_down=p_down,
-            edge=edge,
-            direction=direction,
-        )
+        direction = 1 if edge > 0 else (-1 if edge < 0 else 0)
+        return SignalOutput(p_up=p_up, p_down=p_down, edge=edge, direction=direction)

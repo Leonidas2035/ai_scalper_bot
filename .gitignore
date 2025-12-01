@@ -11,6 +11,8 @@ __pycache__/
 data/
 storage/db/
 storage/cache/
+storage/models/
+storage/datasets/
 *.log
 
 # секрети

@@ -1,9 +1,11 @@
-import os
-import pandas as pd
-import numpy as np
 from pathlib import Path
+from typing import List, Tuple, Optional
 
-FEATURE_COLS = [
+import numpy as np
+import pandas as pd
+
+# Shared feature schema between offline dataset and online feature builder
+FEATURE_COLS: List[str] = [
     "ret_1",
     "ret_log_1",
     "ret_mean_3",
@@ -17,74 +19,96 @@ FEATURE_COLS = [
     "vol_sum_10",
 ]
 
-TARGET_COL = "target"
-
 
 class DatasetBuilder:
     """
-    Створює навчальний датасет з CSV тиков у форматі:
-    timestamp,price,qty,side
+    Loads tick CSVs for a symbol, builds a feature matrix and binary targets.
+    The tick schema is expected to be: timestamp,price,qty,side
     """
 
-    def __init__(self, ticks_path="data/ticks", symbol="BTCUSDT", horizon=1):
-        self.ticks_path = Path(ticks_path)
+    def __init__(self, symbol: str = "BTCUSDT", horizon: int = 1, data_dir: Optional[Path] = None):
+        self.root = Path(__file__).resolve().parents[3]
         self.symbol = symbol
         self.horizon = horizon
+        self.data_dir = data_dir or (self.root / "data" / "ticks")
+        self.fallback_dir = self.root / "data" / "offline"
 
-    def load_ticks(self):
-        dfs = []
-        for f in self.ticks_path.glob(f"{self.symbol}_*.csv"):
+    def _collect_files(self) -> List[Path]:
+        patterns = [f"{self.symbol}_*.csv"]
+        files: List[Path] = []
+        for base in (self.data_dir, self.fallback_dir):
+            if base.exists():
+                for pattern in patterns:
+                    files.extend(base.glob(pattern))
+        return sorted({p.resolve() for p in files})
+
+    def _load_ticks(self) -> pd.DataFrame:
+        files = self._collect_files()
+        if not files:
+            print(f"[WARN] No tick files found for {self.symbol} in {self.data_dir} or {self.fallback_dir}")
+            return pd.DataFrame()
+
+        frames = []
+        for fp in files:
             try:
-                df = pd.read_csv(f)
-                dfs.append(df)
-            except:
-                pass
+                frames.append(pd.read_csv(fp))
+            except Exception as exc:
+                print(f"[WARN] Skipping {fp.name}: {exc}")
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True)
 
-        if not dfs:
-            raise FileNotFoundError(f"No tick files found for {self.symbol}")
+    def _normalize_schema(self, df: pd.DataFrame) -> pd.DataFrame:
+        required_cols = ["timestamp", "price", "qty", "side"]
+        missing = [c for c in required_cols if c not in df.columns]
+        if missing:
+            raise ValueError(f"Missing required columns in ticks: {missing}")
 
-        df = pd.concat(dfs).sort_values("timestamp").reset_index(drop=True)
+        df = df.copy()
+        df = df[required_cols + [c for c in df.columns if c not in required_cols]]
+        df["timestamp"] = pd.to_numeric(df["timestamp"], errors="coerce").astype("Int64")
+        df["price"] = pd.to_numeric(df["price"], errors="coerce")
+        df["qty"] = pd.to_numeric(df["qty"], errors="coerce")
+        df["side"] = df["side"].astype(str).str.lower()
+
+        df = df.dropna(subset=["timestamp", "price", "qty"])
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        df = df.drop_duplicates(subset=["timestamp"], keep="last")
         return df
 
-    def build_features(self, df: pd.DataFrame):
-        df["mid"] = df["price"].astype(float)
+    def _compute_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        df["ret_1"] = df["price"].pct_change()
+        df["ret_log_1"] = np.log(df["price"]).diff()
 
-        df["ret_1"] = df["mid"].pct_change()
-        df["ret_log_1"] = np.log(df["mid"] / df["mid"].shift(1))
+        for window in (3, 5, 10):
+            df[f"ret_mean_{window}"] = df["ret_1"].rolling(window).mean()
+            df[f"ret_std_{window}"] = df["ret_1"].rolling(window).std(ddof=0)
+            df[f"vol_sum_{window}"] = df["qty"].rolling(window).sum()
 
-        for w in (3, 5, 10):
-            r = df["ret_1"].rolling(w)
-            df[f"ret_mean_{w}"] = r.mean()
-            df[f"ret_std_{w}"] = r.std()
-            df[f"vol_sum_{w}"] = df["qty"].rolling(w).sum()
+        df["future_price"] = df["price"].shift(-self.horizon)
+        df["target"] = (df["future_price"] > df["price"]).astype(int)
 
+        df = df.dropna(subset=FEATURE_COLS + ["target"]).reset_index(drop=True)
         return df
 
-    def build_target(self, df: pd.DataFrame):
-        """
-        TARGET:
-        Якщо ціна через 'horizon' тиков вище → 1 (LONG)
-        Якщо нижче → 0 (SHORT)
-        """
-        df["future"] = df["mid"].shift(-self.horizon)
-        df[TARGET_COL] = (df["future"] > df["mid"]).astype(int)
-        return df
+    def build(self) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
+        raw = self._load_ticks()
+        if raw.empty:
+            print(f"[ERROR] No data available for {self.symbol}. Ensure tick CSVs exist in {self.data_dir}.")
+            return pd.DataFrame(), pd.Series(dtype=int), pd.DataFrame()
 
-    def build_dataset(self):
-        df = self.load_ticks()
-        df = self.build_features(df)
-        df = self.build_target(df)
+        try:
+            normalized = self._normalize_schema(raw)
+        except ValueError as exc:
+            print(f"[ERROR] {exc}")
+            return pd.DataFrame(), pd.Series(dtype=int), pd.DataFrame()
 
-        df = df.dropna().reset_index(drop=True)
+        featured = self._compute_features(normalized)
+        if featured.empty:
+            print(f"[ERROR] Not enough data to compute features/targets for {self.symbol}.")
+            return pd.DataFrame(), pd.Series(dtype=int), normalized
 
-        # Вибираємо тільки потрібні фічі
-        X = df[FEATURE_COLS]
-        y = df[TARGET_COL]
-
-        return X, y, df
-
-    def save_parquet(self, df, out_path):
-        out_path = Path(out_path)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(out_path, index=False)
-        print(f"[OK] Saved dataset: {out_path}")
+        X = featured[FEATURE_COLS].copy()
+        y = featured["target"].astype(int).copy()
+        return X, y, featured

@@ -1,36 +1,40 @@
-import csv
-import random
-import time
+import numpy as np
+import pandas as pd
 from pathlib import Path
 
+OUTPUT_DIR = Path("data") / "ticks"
+DEFAULT_FILE = OUTPUT_DIR / "BTCUSDT_synthetic.csv"
 
-def generate_ticks(symbol="BTCUSDT", n=5000, start_price=43000):
-    out_dir = Path("data/ticks")
-    out_dir.mkdir(parents=True, exist_ok=True)
 
-    file_path = out_dir / f"{symbol}_synthetic.csv"
+def generate_ticks(n: int = 5000, symbol: str = "BTCUSDT") -> pd.DataFrame:
+    rng = np.random.default_rng(seed=42)
+    base_price = 45000.0
+    price_changes = rng.normal(loc=0, scale=5, size=n)
+    prices = base_price + np.cumsum(price_changes)
 
-    with open(file_path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["timestamp", "price", "qty", "side"])
+    qty = rng.uniform(0.001, 0.01, size=n)
+    sides = rng.choice(["buy", "sell"], size=n)
 
-        price = start_price
+    timestamps = np.arange(0, n, dtype=int) * 50
+    timestamps = timestamps + 1700000000000
 
-        ts = int(time.time() * 1000)
+    df = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "price": prices,
+            "qty": qty,
+            "side": sides,
+        }
+    )
+    return df
 
-        for _ in range(n):
-            # synthetic micro price movement
-            price += random.uniform(-1, 1)
 
-            qty = random.uniform(0.001, 0.03)
-            side = random.choice(["buy", "sell"])
-
-            writer.writerow([ts, round(price, 2), qty, side])
-
-            ts += random.randint(50, 300)  # random tick spacing
-
-    print(f"[OK] Generated {n} synthetic ticks at {file_path}")
+def main():
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    df = generate_ticks()
+    df.to_csv(DEFAULT_FILE, index=False)
+    print(f"[OK] Generated {len(df)} synthetic ticks at {DEFAULT_FILE}")
 
 
 if __name__ == "__main__":
-    generate_ticks()
+    main()

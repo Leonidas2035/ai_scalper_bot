@@ -1,8 +1,7 @@
-﻿import subprocess
-import os
+import asyncio
 
-base = r"C:\ai_scalper_bot"
-py = os.path.join(base, "venv", "Scripts", "python.exe")
-cmd = [py, "-m", "bot.market_data.ws_manager"]
+from bot.run_bot import main
 
-subprocess.call(cmd)
+
+if __name__ == "__main__":
+    asyncio.run(main())
