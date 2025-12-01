@@ -1,110 +1,90 @@
 import os
-from dataclasses import dataclass
-from typing import Tuple
-
-import numpy as np
 import pandas as pd
+import numpy as np
+from pathlib import Path
+
+FEATURE_COLS = [
+    "ret_1",
+    "ret_log_1",
+    "ret_mean_3",
+    "ret_std_3",
+    "ret_mean_5",
+    "ret_std_5",
+    "ret_mean_10",
+    "ret_std_10",
+    "vol_sum_3",
+    "vol_sum_5",
+    "vol_sum_10",
+]
+
+TARGET_COL = "target"
 
 
-OFFLINE_DIR = os.path.join("data", "offline")
-DATASET_DIR = os.path.join("data", "datasets")
-
-
-@dataclass
-class Dataset:
-    X: np.ndarray
-    y: np.ndarray
-    columns: list
-
-
-def _load_ticks(symbol: str) -> pd.DataFrame:
-    symbol = symbol.upper()
-    fname = f"{symbol}_ticks.csv"
-    path = os.path.join(OFFLINE_DIR, fname)
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Offline ticks file not found: {path}")
-
-    df = pd.read_csv(path)
-    required = ["timestamp", "price"]
-    for col in required:
-        if col not in df.columns:
-            raise ValueError(f"CSV must contain column '{col}'")
-
-    # заповнюємо відсутні колонки дефолтами
-    if "qty" not in df.columns:
-        df["qty"] = 0.0
-
-    df = df.sort_values("timestamp").reset_index(drop=True)
-    return df
-
-
-def build_dataset(symbol: str, horizon: int = 3, min_rows: int = 50) -> Dataset:
+class DatasetBuilder:
     """
-    Створює supervised dataset для класифікації напрямку руху ціни.
-    horizon = скільки тиков вперед дивимось.
+    Створює навчальний датасет з CSV тиков у форматі:
+    timestamp,price,qty,side
     """
-    df = _load_ticks(symbol)
-    symbol = symbol.upper()
 
-    # базові ряди
-    df["mid"] = df["price"].astype(float)
-    df["ret_1"] = df["mid"].pct_change()
-    df["ret_log_1"] = np.log(df["mid"] / df["mid"].shift(1))
+    def __init__(self, ticks_path="data/ticks", symbol="BTCUSDT", horizon=1):
+        self.ticks_path = Path(ticks_path)
+        self.symbol = symbol
+        self.horizon = horizon
 
-    # rolling features
-    for w in (3, 5, 10):
-        df[f"ret_mean_{w}"] = df["ret_1"].rolling(w).mean()
-        df[f"ret_std_{w}"] = df["ret_1"].rolling(w).std()
-        df[f"vol_sum_{w}"] = df["qty"].rolling(w).sum()
+    def load_ticks(self):
+        dfs = []
+        for f in self.ticks_path.glob(f"{self.symbol}_*.csv"):
+            try:
+                df = pd.read_csv(f)
+                dfs.append(df)
+            except:
+                pass
 
-    # ціль: рух ціни через horizon тиков
-    df["future_mid"] = df["mid"].shift(-horizon)
-    df["future_ret"] = (df["future_mid"] - df["mid"]) / df["mid"]
-    df["y"] = (df["future_ret"] > 0).astype(int)
+        if not dfs:
+            raise FileNotFoundError(f"No tick files found for {self.symbol}")
 
-    # чистка NaN
-    df = df.dropna().reset_index(drop=True)
+        df = pd.concat(dfs).sort_values("timestamp").reset_index(drop=True)
+        return df
 
-    if len(df) < min_rows:
-        print(f"[DATASET] Warning: only {len(df)} rows, less than min_rows={min_rows}")
+    def build_features(self, df: pd.DataFrame):
+        df["mid"] = df["price"].astype(float)
 
-    feature_cols = [
-        "ret_1",
-        "ret_log_1",
-        "ret_mean_3",
-        "ret_std_3",
-        "ret_mean_5",
-        "ret_std_5",
-        "ret_mean_10",
-        "ret_std_10",
-        "vol_sum_3",
-        "vol_sum_5",
-        "vol_sum_10",
-    ]
+        df["ret_1"] = df["mid"].pct_change()
+        df["ret_log_1"] = np.log(df["mid"] / df["mid"].shift(1))
 
-    X = df[feature_cols].values.astype(float)
-    y = df["y"].values.astype(int)
+        for w in (3, 5, 10):
+            r = df["ret_1"].rolling(w)
+            df[f"ret_mean_{w}"] = r.mean()
+            df[f"ret_std_{w}"] = r.std()
+            df[f"vol_sum_{w}"] = df["qty"].rolling(w).sum()
 
-    os.makedirs(DATASET_DIR, exist_ok=True)
-    out_path = os.path.join(DATASET_DIR, f"{symbol}_h{horizon}.parquet")
-    df_out = df[feature_cols + ["y"]].copy()
-    df_out.to_parquet(out_path, index=False)
-    print(f"[DATASET] Saved dataset to {out_path}, shape={df_out.shape}")
+        return df
 
-    return Dataset(X=X, y=y, columns=feature_cols)
+    def build_target(self, df: pd.DataFrame):
+        """
+        TARGET:
+        Якщо ціна через 'horizon' тиков вище → 1 (LONG)
+        Якщо нижче → 0 (SHORT)
+        """
+        df["future"] = df["mid"].shift(-self.horizon)
+        df[TARGET_COL] = (df["future"] > df["mid"]).astype(int)
+        return df
 
+    def build_dataset(self):
+        df = self.load_ticks()
+        df = self.build_features(df)
+        df = self.build_target(df)
 
-def load_dataset(symbol: str, horizon: int = 3) -> Dataset:
-    """
-    Завантажити вже збережений датасет, якщо він є.
-    """
-    symbol = symbol.upper()
-    path = os.path.join(DATASET_DIR, f"{symbol}_h{horizon}.parquet")
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Dataset not found: {path}")
+        df = df.dropna().reset_index(drop=True)
 
-    df = pd.read_parquet(path)
-    feature_cols = [c for c in df.columns if c != "y"]
-    X = df[feature_cols].values.astype(float)
-    y = df["y"].values.astype(int)
-    return Dataset(X=X, y=y, columns=feature_cols)
+        # Вибираємо тільки потрібні фічі
+        X = df[FEATURE_COLS]
+        y = df[TARGET_COL]
+
+        return X, y, df
+
+    def save_parquet(self, df, out_path):
+        out_path = Path(out_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(out_path, index=False)
+        print(f"[OK] Saved dataset: {out_path}")
